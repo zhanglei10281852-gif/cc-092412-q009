@@ -17,10 +17,18 @@ def create_department(department: DepartmentCreate):
                VALUES (?, ?, ?)""",
             (department.name, department.manager, department.phone)
         )
+        department_id = cursor.lastrowid
+        cursor.execute(
+            """INSERT OR IGNORE INTO department_snapshots
+               (department_id, name, manager, phone, is_active, effective_at, change_id, created_at)
+               SELECT id, name, manager, phone, 1, created_at, NULL, datetime('now')
+               FROM departments WHERE id = ?""",
+            (department_id,)
+        )
         conn.commit()
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="部门名称已存在")
-    return {"id": cursor.lastrowid, "message": "部门创建成功"}
+    return {"id": department_id, "message": "部门创建成功"}
 
 
 @router.get("")

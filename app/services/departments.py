@@ -29,6 +29,11 @@ class DepartmentService:
             (name, data["manager"].strip(), data["phone"].strip(), now, now),
         )
         created = self.departments.require(int(cursor.lastrowid))
+        self.connection.execute(
+            "INSERT OR IGNORE INTO department_snapshots(department_id,name,manager,phone,is_active,effective_at,change_id,created_at) "
+            "VALUES(?,?,?,?,1,?,NULL,?)",
+            (created["id"], created["name"], created["manager"], created["phone"], created["created_at"], now),
+        )
         self.audit.record(
             AuditContext(principal.user_id, principal.display_name),
             action="department.create",

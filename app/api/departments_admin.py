@@ -3,12 +3,16 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 
 from app.api.dependencies import current_principal
+from app.core.clock import from_storage, to_storage
+from app.core.errors import ValidationError
 from app.core.pagination import Page, page_result
 from app.core.security import Principal
 from app.database import get_connection, transaction
 from app.repositories.business import DepartmentRepository
+from app.repositories.orgchange import OrgChangeRepository
 from app.schemas.business import DepartmentCreateRequest, DepartmentUpdateRequest, MembershipEndRequest, MembershipRequest
 from app.services.departments import DepartmentService
+from app.services.orgchange import OrgChangeService
 
 router = APIRouter(prefix="/api/departments", tags=["部门成员"])
 
@@ -16,6 +20,7 @@ router = APIRouter(prefix="/api/departments", tags=["部门成员"])
 @router.get("")
 def list_departments(
     active_only: bool = True,
+    as_of: str | None = None,
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     principal: Principal = Depends(current_principal),
@@ -25,6 +30,23 @@ def list_departments(
     repository = DepartmentRepository(get_connection())
     where = "is_active=1" if active_only else ""
     rows = repository.list(active_only=active_only, limit=size, offset=pagination.offset)
+    if as_of:
+        moment = from_storage(as_of)
+        if moment is None:
+            raise ValidationError("as_of 时间无效")
+        snapshots = OrgChangeRepository(get_connection())
+        moment_storage = to_storage(moment)
+        for row in rows:
+            snapshot = snapshots.snapshot_at(row["id"], moment_storage)
+            if snapshot:
+                row.update(
+                    {
+                        "name": snapshot["name"],
+                        "manager": snapshot["manager"],
+                        "phone": snapshot["phone"],
+                        "is_active": snapshot["is_active"],
+                    }
+                )
     return page_result(total=repository.count(where), page=pagination, rows=rows)
 
 
@@ -47,6 +69,11 @@ def list_members(department_id: int, principal: Principal = Depends(current_prin
     repository = DepartmentRepository(get_connection())
     repository.require(department_id)
     return repository.active_memberships(department_id, to_storage(utc_now()))
+
+
+@router.get("/{department_id}/timeline")
+def department_timeline(department_id: int, principal: Principal = Depends(current_principal)) -> dict:
+    return OrgChangeService(get_connection()).department_timeline(principal, department_id)
 
 
 @router.post("/users/{user_id}/memberships", status_code=201)

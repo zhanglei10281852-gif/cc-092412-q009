@@ -2,8 +2,11 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 from app.database import get_connection
 from app.models import AffairCreate, AffairProcess, AffairStatus
+from app.repositories.orgchange import historical_department_name_sql
 
 router = APIRouter(prefix="/affairs", tags=["事务办理"])
+
+HISTORICAL_NAME = historical_department_name_sql("a.department_id", "a.created_at")
 
 
 @router.post("", status_code=201)
@@ -56,7 +59,8 @@ def list_affairs(
     total = cursor.fetchone()["total"]
 
     offset = (page - 1) * size
-    query_sql = f"""SELECT a.*, r.name as applicant_name, d.name as department_name
+    query_sql = f"""SELECT a.*, r.name as applicant_name, d.name as department_name,
+                    {HISTORICAL_NAME} as department_name_at
                     FROM affairs a
                     LEFT JOIN residents r ON a.applicant_id = r.id
                     LEFT JOIN departments d ON a.department_id = d.id
@@ -78,8 +82,9 @@ def get_affair(affair_id: int):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        """SELECT a.*, r.name as applicant_name, r.phone as applicant_phone,
-           d.name as department_name, d.manager as department_manager, d.phone as department_phone
+        f"""SELECT a.*, r.name as applicant_name, r.phone as applicant_phone,
+           d.name as department_name, d.manager as department_manager, d.phone as department_phone,
+           {HISTORICAL_NAME} as department_name_at
            FROM affairs a
            LEFT JOIN residents r ON a.applicant_id = r.id
            LEFT JOIN departments d ON a.department_id = d.id
@@ -118,9 +123,9 @@ def process_affair(affair_id: int, data: AffairProcess):
         )
 
     if data.department_id is not None:
-        cursor.execute("SELECT id FROM departments WHERE id = ?", (data.department_id,))
+        cursor.execute("SELECT id FROM departments WHERE id = ? AND is_active = 1", (data.department_id,))
         if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail="承办部门不存在")
+            raise HTTPException(status_code=404, detail="承办部门不存在或已停用")
 
     cursor.execute(
         """UPDATE affairs SET status = ?, department_id = COALESCE(?, department_id),

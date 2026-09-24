@@ -7,8 +7,11 @@ from app.models import (
     PetitionCreate, PetitionAssign, PetitionProcess, PetitionReview,
     PetitionReapplyReview, PetitionUrgeCreate, PetitionType, PetitionStatus
 )
+from app.repositories.orgchange import historical_department_name_sql
 
 router = APIRouter(prefix="/petitions", tags=["信访投诉"])
+
+HISTORICAL_NAME = historical_department_name_sql("p.department_id", "p.created_at")
 
 
 def add_flow_record(petition_id: int, action: str, operator: str = None, remark: str = None):
@@ -84,7 +87,7 @@ def list_petitions(
     total = cursor.fetchone()["total"]
 
     offset = (page - 1) * size
-    query_sql = f"""SELECT p.*, d.name as department_name
+    query_sql = f"""SELECT p.*, d.name as department_name, {HISTORICAL_NAME} as department_name_at
                     FROM petitions p
                     LEFT JOIN departments d ON p.department_id = d.id
                     {where_clause}
@@ -140,7 +143,8 @@ def get_petition(petition_id: int):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        """SELECT p.*, d.name as department_name, d.manager as department_manager, d.phone as department_phone
+        f"""SELECT p.*, d.name as department_name, d.manager as department_manager, d.phone as department_phone,
+           {HISTORICAL_NAME} as department_name_at
            FROM petitions p
            LEFT JOIN departments d ON p.department_id = d.id
            WHERE p.id = ?""",
@@ -204,9 +208,9 @@ def assign_petition(petition_id: int, data: PetitionAssign):
     if row["status"] != "待分派" and row["status"] != "退回重办":
         raise HTTPException(status_code=400, detail="当前状态不允许分派")
 
-    cursor.execute("SELECT id FROM departments WHERE id = ?", (data.department_id,))
+    cursor.execute("SELECT id FROM departments WHERE id = ? AND is_active = 1", (data.department_id,))
     if not cursor.fetchone():
-        raise HTTPException(status_code=404, detail="承办部门不存在")
+        raise HTTPException(status_code=404, detail="承办部门不存在或已停用")
 
     deadline = (datetime.now() + timedelta(days=data.deadline_days)).strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute(

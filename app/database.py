@@ -215,6 +215,70 @@ CREATE TABLE IF NOT EXISTS background_jobs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_ready ON background_jobs(status, available_at);
+
+CREATE TABLE IF NOT EXISTS org_changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    change_type TEXT NOT NULL CHECK(change_type IN ('rename','deactivate','merge','split')),
+    effective_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','applied','conflict','revoked')),
+    payload_json TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    conflict_count INTEGER NOT NULL DEFAULT 0,
+    created_by INTEGER REFERENCES users(id),
+    created_by_name TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    applied_at TEXT,
+    revoked_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_org_changes_due ON org_changes(status, effective_at);
+
+CREATE TABLE IF NOT EXISTS department_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL REFERENCES departments(id),
+    name TEXT NOT NULL,
+    manager TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    is_active INTEGER NOT NULL CHECK (is_active IN (0,1)),
+    effective_at TEXT NOT NULL,
+    change_id INTEGER REFERENCES org_changes(id),
+    created_at TEXT NOT NULL,
+    UNIQUE(department_id, effective_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dept_snapshots_lookup ON department_snapshots(department_id, effective_at DESC);
+
+CREATE TABLE IF NOT EXISTS org_change_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    change_id INTEGER NOT NULL REFERENCES org_changes(id) ON DELETE CASCADE,
+    item_type TEXT NOT NULL CHECK(item_type IN ('affair','petition')),
+    item_id INTEGER NOT NULL,
+    source_department_id INTEGER NOT NULL REFERENCES departments(id),
+    target_department_id INTEGER REFERENCES departments(id),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','migrated','manual','resolved')),
+    resolution TEXT,
+    resolved_by TEXT,
+    resolved_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(change_id, item_type, item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_org_change_items_status ON org_change_items(change_id, status);
+
+CREATE TABLE IF NOT EXISTS department_successions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    change_id INTEGER NOT NULL REFERENCES org_changes(id) ON DELETE CASCADE,
+    predecessor_id INTEGER NOT NULL REFERENCES departments(id),
+    successor_id INTEGER NOT NULL REFERENCES departments(id),
+    relation TEXT NOT NULL CHECK(relation IN ('rename','deactivate','merge','split')),
+    effective_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(change_id, predecessor_id, successor_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dept_successions ON department_successions(predecessor_id, successor_id);
 '''
 
 PERMISSIONS = [

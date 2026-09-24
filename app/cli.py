@@ -5,7 +5,7 @@ import json
 
 from fastapi.testclient import TestClient
 
-from app.database import database_path, get_connection, init_db
+from app.database import database_path, get_connection, init_db, transaction
 from app.main import app
 
 
@@ -38,14 +38,25 @@ def command_smoke() -> int:
     return 0 if result["status_codes"] == [200, 200] else 1
 
 
+def command_apply_org_changes() -> int:
+    from app.services.orgchange import OrgChangeService
+
+    init_db()
+    with transaction(immediate=True) as connection:
+        results = OrgChangeService(connection).apply_due(actor_name="cli.apply-org-changes")
+    print(json.dumps({"results": results}, ensure_ascii=False))
+    return 0 if all(item.get("status") != "error" for item in results) else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="township-service", description="乡镇政务协同服务维护入口")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("init-db", help="初始化 SQLite 数据库")
     subparsers.add_parser("check-db", help="检查数据库完整性")
     subparsers.add_parser("smoke", help="执行本地 API 冒烟检查")
+    subparsers.add_parser("apply-org-changes", help="执行所有已到生效时间的组织变更计划")
     args = parser.parse_args()
-    return {"init-db": command_init, "check-db": command_check, "smoke": command_smoke}[args.command]()
+    return {"init-db": command_init, "check-db": command_check, "smoke": command_smoke, "apply-org-changes": command_apply_org_changes}[args.command]()
 
 
 if __name__ == "__main__":
