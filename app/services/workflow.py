@@ -70,6 +70,8 @@ class PetitionWorkflowService:
         if department_id is not None:
             updates.append("department_id=?")
             params.append(department_id)
+            updates.append("department_assigned_at=?")
+            params.append(to_storage(self.clock.now()))
         if result is not None:
             updates.append("process_result=?")
             params.append(result)

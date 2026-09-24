@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS departments (
     manager TEXT NOT NULL,
     phone TEXT NOT NULL,
     is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+    valid_from TEXT,
+    deactivated_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -135,6 +137,7 @@ CREATE TABLE IF NOT EXISTS affairs (
     description TEXT,
     status TEXT NOT NULL DEFAULT '待受理' CHECK(status IN ('待受理','办理中','已办结','已退回')),
     department_id INTEGER REFERENCES departments(id),
+    department_assigned_at TEXT,
     handler TEXT,
     result TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -161,6 +164,7 @@ CREATE TABLE IF NOT EXISTS petitions (
     is_anonymous INTEGER NOT NULL DEFAULT 0 CHECK(is_anonymous IN (0,1)),
     status TEXT NOT NULL DEFAULT '待签收' CHECK(status IN ('待签收','待分派','办理中','待审核','已办结','退回重办','复查中','复查完结')),
     department_id INTEGER REFERENCES departments(id),
+    department_assigned_at TEXT,
     deadline TEXT,
     process_result TEXT,
     review_opinion TEXT,
@@ -185,6 +189,17 @@ CREATE TABLE IF NOT EXISTS petition_flow_records (
     remark TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS affair_flow_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    affair_id INTEGER NOT NULL REFERENCES affairs(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    operator TEXT,
+    remark TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_affair_flow ON affair_flow_records(affair_id, created_at);
 
 CREATE TABLE IF NOT EXISTS department_memberships (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -215,7 +230,86 @@ CREATE TABLE IF NOT EXISTS background_jobs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_ready ON background_jobs(status, available_at);
+
+CREATE TABLE IF NOT EXISTS department_aliases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    valid_from TEXT NOT NULL,
+    valid_to TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(department_id, valid_from)
+);
+
+CREATE INDEX IF NOT EXISTS idx_aliases_name ON department_aliases(name, valid_from);
+
+CREATE TABLE IF NOT EXISTS department_successors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    predecessor_id INTEGER NOT NULL REFERENCES departments(id),
+    successor_id INTEGER NOT NULL REFERENCES departments(id),
+    change_type TEXT NOT NULL CHECK(change_type IN ('rename','deactivate','split','merge')),
+    effective_at TEXT NOT NULL,
+    plan_id INTEGER,
+    created_at TEXT NOT NULL,
+    UNIQUE(predecessor_id, successor_id, effective_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_successors_pred ON department_successors(predecessor_id, effective_at);
+CREATE INDEX IF NOT EXISTS idx_successors_succ ON department_successors(successor_id, effective_at);
+
+CREATE TABLE IF NOT EXISTS org_change_plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL UNIQUE,
+    change_type TEXT NOT NULL CHECK(change_type IN ('rename','deactivate','split','merge')),
+    source_department_ids TEXT NOT NULL,
+    target_department_ids TEXT NOT NULL,
+    new_names TEXT NOT NULL DEFAULT '[]',
+    transfer_policy TEXT NOT NULL DEFAULT 'auto' CHECK(transfer_policy IN ('auto','manual')),
+    member_transfer TEXT NOT NULL DEFAULT '{}',
+    spec_json TEXT NOT NULL DEFAULT '{}',
+    effective_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','applied','revoked','conflict','failed')),
+    note TEXT NOT NULL DEFAULT '',
+    applied_at TEXT,
+    revoked_at TEXT,
+    created_by INTEGER REFERENCES users(id),
+    created_by_name TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_org_plans_status ON org_change_plans(status, effective_at);
+
+CREATE TABLE IF NOT EXISTS org_change_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id INTEGER NOT NULL REFERENCES org_change_plans(id) ON DELETE CASCADE,
+    resource_type TEXT NOT NULL CHECK(resource_type IN ('affair','petition','member')),
+    resource_id INTEGER NOT NULL,
+    current_department_id INTEGER NOT NULL REFERENCES departments(id),
+    candidate_department_ids TEXT NOT NULL DEFAULT '[]',
+    resolution_department_id INTEGER REFERENCES departments(id),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','resolved')),
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    UNIQUE(resource_type, resource_id, plan_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_org_targets_plan ON org_change_targets(plan_id, status);
+
+CREATE TABLE IF NOT EXISTS org_change_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id INTEGER,
+    action TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
 '''
+
+# 既有业务表的增量列：记录承办关系建立时刻，历史按当时组织还原
+_MIGRATION_COLUMNS = (
+    ("affairs", "department_assigned_at", "TEXT"),
+    ("petitions", "department_assigned_at", "TEXT"),
+)
 
 PERMISSIONS = [
     ("users.read", "查看用户", "users", "read"),
@@ -233,6 +327,8 @@ PERMISSIONS = [
     ("announcements.write", "维护公告", "announcements", "write"),
     ("audit.read", "查看审计", "audit", "read"),
     ("jobs.run", "执行后台任务", "jobs", "run"),
+    ("orgchanges.read", "查看组织变更", "orgchanges", "read"),
+    ("orgchanges.write", "维护组织变更", "orgchanges", "write"),
 ]
 
 
@@ -281,10 +377,41 @@ def transaction(*, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         connection.commit()
 
 
+def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _apply_incremental_migrations(connection: sqlite3.Connection, now: str) -> None:
+    """对既有数据库做增量迁移，重复执行保持幂等。"""
+    for table, column, definition in _MIGRATION_COLUMNS:
+        if column not in _table_columns(connection, table):
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    department_columns = _table_columns(connection, "departments")
+    if "valid_from" not in department_columns:
+        connection.execute("ALTER TABLE departments ADD COLUMN valid_from TEXT")
+    if "deactivated_at" not in department_columns:
+        connection.execute("ALTER TABLE departments ADD COLUMN deactivated_at TEXT")
+    # 回填部门存续区间与名称时间线，保证历史查询可按当时组织还原
+    connection.execute("UPDATE departments SET valid_from=COALESCE(valid_from, created_at)")
+    connection.execute(
+        "UPDATE departments SET deactivated_at=COALESCE(deactivated_at, updated_at) WHERE is_active=0 AND deactivated_at IS NULL"
+    )
+    connection.execute(
+        "INSERT INTO department_aliases(department_id,name,valid_from,created_at) "
+        "SELECT d.id,d.name,d.valid_from,? FROM departments d "
+        "WHERE NOT EXISTS (SELECT 1 FROM department_aliases a WHERE a.department_id=d.id)",
+        (now,),
+    )
+    # 既有业务记录补承办时刻：无流转记录时退化为记录创建时间
+    connection.execute("UPDATE affairs SET department_assigned_at=COALESCE(department_assigned_at, updated_at) WHERE department_id IS NOT NULL")
+    connection.execute("UPDATE petitions SET department_assigned_at=COALESCE(department_assigned_at, updated_at) WHERE department_id IS NOT NULL")
+
+
 def init_db() -> None:
     now = to_storage(utc_now())
     with transaction(immediate=True) as connection:
         connection.executescript(SCHEMA)
+        _apply_incremental_migrations(connection, now)
         for code, name, resource, action in PERMISSIONS:
             connection.execute(
                 "INSERT OR IGNORE INTO permissions(code,name,resource,action) VALUES(?,?,?,?)",

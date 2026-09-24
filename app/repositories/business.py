@@ -4,6 +4,11 @@ import sqlite3
 from typing import Any
 
 from app.repositories.base import Repository, row_dict, rows_dict
+from app.repositories.orgchange import department_name_at_sql
+
+# 历史展示口径：部门名称按记录承办时刻（无承办时刻时按创建时刻）还原
+_AFFAIR_NAME = department_name_at_sql("a.department_id", "COALESCE(a.department_assigned_at, a.created_at)")
+_PETITION_NAME = department_name_at_sql("p.department_id", "COALESCE(p.department_assigned_at, p.created_at)")
 
 
 class DepartmentRepository(Repository):
@@ -76,7 +81,7 @@ class PetitionRepository(Repository):
 
     def detail(self, petition_id: int) -> dict[str, Any] | None:
         petition = row_dict(self.connection.execute(
-            "SELECT p.*,d.name AS department_name FROM petitions p LEFT JOIN departments d ON d.id=p.department_id WHERE p.id=?",
+            f"SELECT p.*,{_PETITION_NAME} AS department_name FROM petitions p WHERE p.id=?",
             (petition_id,),
         ).fetchone())
         if petition is None:
@@ -113,7 +118,7 @@ class PetitionRepository(Repository):
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
         params.extend([limit, offset])
         return rows_dict(self.connection.execute(
-            "SELECT p.*,d.name AS department_name FROM petitions p LEFT JOIN departments d ON d.id=p.department_id"
+            f"SELECT p.*,{_PETITION_NAME} AS department_name FROM petitions p"
             + where + " ORDER BY p.id DESC LIMIT ? OFFSET ?", tuple(params)
         ).fetchall())
 
@@ -131,8 +136,8 @@ class AffairRepository(Repository):
 
     def detail(self, affair_id: int) -> dict[str, Any] | None:
         return row_dict(self.connection.execute(
-            "SELECT a.*,r.name AS applicant_name,d.name AS department_name FROM affairs a "
-            "JOIN residents r ON r.id=a.applicant_id LEFT JOIN departments d ON d.id=a.department_id WHERE a.id=?",
+            f"SELECT a.*,r.name AS applicant_name,{_AFFAIR_NAME} AS department_name FROM affairs a "
+            "JOIN residents r ON r.id=a.applicant_id WHERE a.id=?",
             (affair_id,),
         ).fetchone())
 
@@ -148,7 +153,7 @@ class AffairRepository(Repository):
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
         params.extend([limit, offset])
         return rows_dict(self.connection.execute(
-            "SELECT a.*,r.name AS applicant_name,d.name AS department_name FROM affairs a "
-            "JOIN residents r ON r.id=a.applicant_id LEFT JOIN departments d ON d.id=a.department_id"
+            f"SELECT a.*,r.name AS applicant_name,{_AFFAIR_NAME} AS department_name FROM affairs a "
+            "JOIN residents r ON r.id=a.applicant_id"
             + where + " ORDER BY a.id DESC LIMIT ? OFFSET ?", tuple(params)
         ).fetchall())

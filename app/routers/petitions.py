@@ -7,8 +7,14 @@ from app.models import (
     PetitionCreate, PetitionAssign, PetitionProcess, PetitionReview,
     PetitionReapplyReview, PetitionUrgeCreate, PetitionType, PetitionStatus
 )
+from app.repositories.orgchange import department_name_at_sql
 
 router = APIRouter(prefix="/petitions", tags=["信访投诉"])
+
+# 历史展示口径：按承办时刻还原部门名称
+_HISTORICAL_DEPARTMENT_NAME = department_name_at_sql(
+    "p.department_id", "COALESCE(p.department_assigned_at, p.created_at)"
+)
 
 
 def add_flow_record(petition_id: int, action: str, operator: str = None, remark: str = None):
@@ -84,9 +90,8 @@ def list_petitions(
     total = cursor.fetchone()["total"]
 
     offset = (page - 1) * size
-    query_sql = f"""SELECT p.*, d.name as department_name
+    query_sql = f"""SELECT p.*, {_HISTORICAL_DEPARTMENT_NAME} as department_name
                     FROM petitions p
-                    LEFT JOIN departments d ON p.department_id = d.id
                     {where_clause}
                     ORDER BY p.created_at DESC LIMIT ? OFFSET ?"""
     cursor.execute(query_sql, params + [size, offset])
@@ -113,9 +118,8 @@ def list_timeout_petitions(
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        """SELECT p.*, d.name as department_name
+        f"""SELECT p.*, {_HISTORICAL_DEPARTMENT_NAME} as department_name
            FROM petitions p
-           LEFT JOIN departments d ON p.department_id = d.id
            WHERE p.status NOT IN ('已办结', '复查完结')
            AND p.deadline IS NOT NULL
            ORDER BY p.deadline ASC"""
@@ -140,7 +144,8 @@ def get_petition(petition_id: int):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        """SELECT p.*, d.name as department_name, d.manager as department_manager, d.phone as department_phone
+        f"""SELECT p.*, {_HISTORICAL_DEPARTMENT_NAME} as department_name,
+           d.manager as department_manager, d.phone as department_phone
            FROM petitions p
            LEFT JOIN departments d ON p.department_id = d.id
            WHERE p.id = ?""",
@@ -211,7 +216,7 @@ def assign_petition(petition_id: int, data: PetitionAssign):
     deadline = (datetime.now() + timedelta(days=data.deadline_days)).strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute(
         """UPDATE petitions SET status = '办理中', department_id = ?, deadline = ?,
-           updated_at = datetime('now') WHERE id = ?""",
+           department_assigned_at = datetime('now'), updated_at = datetime('now') WHERE id = ?""",
         (data.department_id, deadline, petition_id)
     )
     conn.commit()

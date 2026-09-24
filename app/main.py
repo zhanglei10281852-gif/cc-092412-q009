@@ -5,16 +5,19 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.api import audit, auth, departments_admin, maintenance, metrics, roles, system, users, workflow
+from app.api import audit, auth, departments_admin, maintenance, metrics, orgchanges, roles, system, users, workflow
 from app.core.errors import DomainError
 from app.database import close_connection, init_db
 from app.routers import affairs, announcements, departments, petitions, residents
+from app.services.orgchange import apply_due_plans
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     del app
     init_db()
+    # 服务重启后补发已到期的组织变更计划，执行过程保持幂等
+    apply_due_plans()
     yield
     close_connection()
 
@@ -37,6 +40,8 @@ app.include_router(roles.router)
 app.include_router(audit.router)
 app.include_router(system.router)
 app.include_router(departments_admin.router)
+app.include_router(orgchanges.router)
+app.include_router(orgchanges.timeline_router)
 app.include_router(workflow.router)
 app.include_router(metrics.router)
 app.include_router(maintenance.router)

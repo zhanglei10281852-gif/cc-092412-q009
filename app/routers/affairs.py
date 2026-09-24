@@ -2,8 +2,14 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 from app.database import get_connection
 from app.models import AffairCreate, AffairProcess, AffairStatus
+from app.repositories.orgchange import department_name_at_sql
 
 router = APIRouter(prefix="/affairs", tags=["事务办理"])
+
+# 历史展示口径：按承办时刻还原部门名称
+_HISTORICAL_DEPARTMENT_NAME = department_name_at_sql(
+    "a.department_id", "COALESCE(a.department_assigned_at, a.created_at)"
+)
 
 
 @router.post("", status_code=201)
@@ -56,10 +62,9 @@ def list_affairs(
     total = cursor.fetchone()["total"]
 
     offset = (page - 1) * size
-    query_sql = f"""SELECT a.*, r.name as applicant_name, d.name as department_name
+    query_sql = f"""SELECT a.*, r.name as applicant_name, {_HISTORICAL_DEPARTMENT_NAME} as department_name
                     FROM affairs a
                     LEFT JOIN residents r ON a.applicant_id = r.id
-                    LEFT JOIN departments d ON a.department_id = d.id
                     {where_clause}
                     ORDER BY a.created_at DESC LIMIT ? OFFSET ?"""
     cursor.execute(query_sql, params + [size, offset])
@@ -78,8 +83,9 @@ def get_affair(affair_id: int):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        """SELECT a.*, r.name as applicant_name, r.phone as applicant_phone,
-           d.name as department_name, d.manager as department_manager, d.phone as department_phone
+        f"""SELECT a.*, r.name as applicant_name, r.phone as applicant_phone,
+           {_HISTORICAL_DEPARTMENT_NAME} as department_name,
+           d.manager as department_manager, d.phone as department_phone
            FROM affairs a
            LEFT JOIN residents r ON a.applicant_id = r.id
            LEFT JOIN departments d ON a.department_id = d.id
@@ -89,7 +95,13 @@ def get_affair(affair_id: int):
     row = cursor.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="事务不存在")
-    return dict(row)
+    result = dict(row)
+    cursor.execute(
+        "SELECT * FROM affair_flow_records WHERE affair_id = ? ORDER BY created_at ASC, id ASC",
+        (affair_id,)
+    )
+    result["flow_records"] = [dict(r) for r in cursor.fetchall()]
+    return result
 
 
 @router.put("/{affair_id}/process")
@@ -122,10 +134,17 @@ def process_affair(affair_id: int, data: AffairProcess):
         if not cursor.fetchone():
             raise HTTPException(status_code=404, detail="承办部门不存在")
 
-    cursor.execute(
-        """UPDATE affairs SET status = ?, department_id = COALESCE(?, department_id),
-           handler = ?, result = ?, updated_at = datetime('now') WHERE id = ?""",
-        (new_status, data.department_id, data.handler, data.result, affair_id)
-    )
+    if data.department_id is not None:
+        cursor.execute(
+            """UPDATE affairs SET status = ?, department_id = ?, department_assigned_at = datetime('now'),
+               handler = ?, result = ?, updated_at = datetime('now') WHERE id = ?""",
+            (new_status, data.department_id, data.handler, data.result, affair_id)
+        )
+    else:
+        cursor.execute(
+            """UPDATE affairs SET status = ?, handler = ?, result = ?,
+               updated_at = datetime('now') WHERE id = ?""",
+            (new_status, data.handler, data.result, affair_id)
+        )
     conn.commit()
     return {"message": "事务处理成功", "status": new_status}

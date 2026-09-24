@@ -41,7 +41,13 @@ class MaintenanceService:
         "petitions",
         "petition_urges",
         "petition_flow_records",
+        "affair_flow_records",
         "department_memberships",
+        "department_aliases",
+        "department_successors",
+        "org_change_plans",
+        "org_change_targets",
+        "org_change_log",
         "audit_events",
         "background_jobs",
     )

@@ -25,10 +25,15 @@ class DepartmentService:
             raise ConflictError("部门名称已存在")
         now = to_storage(self.clock.now())
         cursor = self.connection.execute(
-            "INSERT INTO departments(name,manager,phone,is_active,created_at,updated_at) VALUES(?,?,?,1,?,?)",
-            (name, data["manager"].strip(), data["phone"].strip(), now, now),
+            "INSERT INTO departments(name,manager,phone,is_active,valid_from,created_at,updated_at) VALUES(?,?,?,1,?,?,?)",
+            (name, data["manager"].strip(), data["phone"].strip(), now, now, now),
         )
-        created = self.departments.require(int(cursor.lastrowid))
+        department_id = int(cursor.lastrowid)
+        self.connection.execute(
+            "INSERT INTO department_aliases(department_id,name,valid_from,created_at) VALUES(?,?,?,?)",
+            (department_id, name, now, now),
+        )
+        created = self.departments.require(department_id)
         self.audit.record(
             AuditContext(principal.user_id, principal.display_name),
             action="department.create",
@@ -45,13 +50,30 @@ class DepartmentService:
         if not allowed:
             raise ValidationError("没有可更新的部门字段")
         if "name" in allowed:
-            duplicate = self.departments.by_name(str(allowed["name"]).strip())
+            allowed["name"] = str(allowed["name"]).strip()
+            duplicate = self.departments.by_name(allowed["name"])
             if duplicate and duplicate["id"] != department_id:
                 raise ConflictError("部门名称已存在")
+        now = to_storage(self.clock.now())
+        # 直接改名同样写入名称时间线，保证历史查询按当时组织展示
+        if "name" in allowed and allowed["name"] != before["name"]:
+            self.connection.execute(
+                "UPDATE department_aliases SET valid_to=? WHERE department_id=? AND valid_to IS NULL",
+                (now, department_id),
+            )
+            self.connection.execute(
+                "INSERT INTO department_aliases(department_id,name,valid_from,created_at) VALUES(?,?,?,?)",
+                (department_id, allowed["name"], now, now),
+            )
+        if "is_active" in allowed:
+            if allowed["is_active"] and not before["is_active"]:
+                allowed["deactivated_at"] = None
+            elif not allowed["is_active"] and before["is_active"]:
+                allowed["deactivated_at"] = now
         assignments = [f"{key}=?" for key in allowed]
         self.connection.execute(
             f"UPDATE departments SET {','.join(assignments)},updated_at=? WHERE id=?",
-            (*allowed.values(), to_storage(self.clock.now()), department_id),
+            (*allowed.values(), now, department_id),
         )
         after = self.departments.require(department_id)
         self.audit.record(
